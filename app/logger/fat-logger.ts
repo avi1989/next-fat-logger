@@ -25,27 +25,36 @@ type Handler<C> = (req: NextRequest, ctx: C) => Promise<Response | null> | Respo
 export function withLogging<C>(handler: Handler<C>, name?: string): Handler<C> {
     return async (req: NextRequest, ctx: C) => {
         let res: Response | null = null;
+        let error: unknown = null;
+        const start = performance.now();
         const event: WideEvent = {
-            timestamp: new Date().toISOString(), 
+            timestamp: new Date().toISOString(),
+            //TODO: Extract path from url
             path: req.url,
             method: req.method,
         }
         await storage.run(event, async () => {
             try {
                 res = await handler(req, ctx);
-                event.outcome = "success" 
+                event.outcome = "success"
             }
             catch(e) {
+                error = e;
+                event.outcome = "error";
                 event.error = {
                     exception: e,
-                    //TODO: Add status etc.
+                    status: res?.status.toString()
                 }
-
             }
             finally {
-                console.log(event)
+                event.duration_ms = performance.now() - start;
+                logger.info(event)
             }
         })
+        if (error) {
+            logger.error(event)
+            throw error;
+        }
         return res;
     }
 }
