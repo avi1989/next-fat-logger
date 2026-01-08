@@ -1,74 +1,95 @@
-import { NextRequest } from "next/server";
+import { trace, SpanStatusCode } from "@opentelemetry/api";
+import type { ReadableSpan, Span, } from "@opentelemetry/sdk-trace-base";
 import { logger } from "./core-logger";
 
-export type WideEvent = {
-	timestamp: string;
-	request_id?: string | null;
-	trace_id?: string;
-	method?: string;
-	path?: string;
-	status_code?: number;
-	duration_ms?: number;
-	outcome?: "success" | "error";
-	error?: {
-		status?: string;
-        exception: any;
-	};
+const LOG_DATA_KEY = "__logData";
 
-    [key: string]: unknown;
+type LogData = {
+    timestamp: string;
+    startTime: number;
+    [key: string]: any;
 };
 
-const storage = new AsyncLocalStorage<WideEvent>();
+type ExtendedSpan = Span & ReadableSpan & {
+    [LOG_DATA_KEY]?: LogData;
+};
 
-type Handler<C> = (req: NextRequest, ctx: C) => Promise<Response | null> | Response | null;
+export const log = (data: any, scope?: string) => {
+    const span = trace.getActiveSpan() as unknown as ExtendedSpan;
 
-export function withLogging<C>(handler: Handler<C>, name?: string): Handler<C> {
-    return async (req: NextRequest, ctx: C) => {
-        let res: Response | null = null;
-        let error: unknown = null;
-        const start = performance.now();
-        const event: WideEvent = {
+    if (!span) {
+        throw("No active span found. Ensure OTEL instrumentation is properly configured.");
+    }
+
+    if (!span[LOG_DATA_KEY]) {
+        span[LOG_DATA_KEY] = {
             timestamp: new Date().toISOString(),
-            //TODO: Extract path from url
-            path: req.url,
-            method: req.method,
-        }
-        await storage.run(event, async () => {
-            try {
-                res = await handler(req, ctx);
-                event.outcome = "success"
-            }
-            catch(e) {
-                error = e;
-                event.outcome = "error";
-                event.error = {
-                    exception: e,
-                    status: res?.status.toString()
-                }
-            }
-            finally {
-                event.duration_ms = performance.now() - start;
-                logger.info(event)
-            }
-        })
-        if (error) {
-            logger.error(event)
-            throw error;
-        }
-        return res;
+            startTime: performance.now(),
+        };
+
+        const originalEnd = span.end;
+        span.end = function(endTime?: number) {
+            flushLog();
+            originalEnd.call(this, endTime);
+        };
     }
-}
 
+    const accumulated = span[LOG_DATA_KEY];
 
-export const log = (data: any, method?: string) => {
-    const store = storage.getStore()!;
-    if (method != null) {
-        if (store[method] == null) {
-            store[method] = {}
+    if (scope != null) {
+        if (!accumulated[scope]) {
+            accumulated[scope] = {};
         }
+        Object.assign(accumulated[scope], data);
 
-        Object.assign(store[method] as object, data)
+        const spanAttributes: Record<string, any> = {};
+        for (const [key, value] of Object.entries(data)) {
+            spanAttributes[`${scope}.${key}`] = value;
+        }
+        span.setAttributes(spanAttributes);
     } else {
-        Object.assign(store, data)
+        Object.assign(accumulated, data);
+        span.setAttributes(data);
     }
-}
+};
+
+export const flushLog = () => {
+    const span = trace.getActiveSpan() as unknown as ExtendedSpan;
+
+    if (!span) {
+        throw("No active span found. Ensure OTEL instrumentation is properly configured.");
+    }
+
+    // Accumulated should never be null. We are setting it
+    // before we call flushLog.
+    const accumulated = span[LOG_DATA_KEY]!;
+
+
+    const duration_ms = performance.now() - accumulated.startTime;
+
+    const spanContext = span.spanContext();
+    const attributes = span.attributes || {};
+
+    const { timestamp, startTime, ...customData } = accumulated;
+
+    let logData: any = {
+        timestamp,
+        path: attributes["next.route"],
+        trace_id: spanContext.traceId,
+        span_id: spanContext.spanId,
+        // TODO: Find a way to get Method.
+        status_code: attributes["http.status_code"],
+        duration_ms,
+        ...customData,
+    };
+
+    if (span.status.code === SpanStatusCode.ERROR) {
+        logData = {
+            ...logData,
+            exception: span.status.message
+        }
+        logger.error(logData);
+    } else {
+        logger.info(logData);
+    }
+};
