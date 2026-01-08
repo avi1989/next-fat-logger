@@ -5,6 +5,6 @@ export function getPatients() {
         id: "1234",
         name: "Hello"
     }]
-    log({patients})
+    log({patients}, "getPatients")
     return patients;
 }

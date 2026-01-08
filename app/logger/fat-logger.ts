@@ -60,7 +60,15 @@ export function withLogging<C>(handler: Handler<C>, name?: string): Handler<C> {
 }
 
 
-export const log = (data: any) => {
-    const store = storage.getStore();
-    Object.assign(store!, data)
+export const log = (data: any, method?: string) => {
+    const store = storage.getStore()!;
+    if (method != null) {
+        if (store[method] == null) {
+            store[method] = {}
+        }
+
+        Object.assign(store[method] as object, data)
+    } else {
+        Object.assign(store, data)
+    }
 }

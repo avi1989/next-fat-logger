@@ -1,9 +1,9 @@
 function logInfo<T>(data: T) {
-	console.info(data);
+	console.info(JSON.stringify(data, null, 2));
 }
 
 function logError<T>(data: T) {
-	console.error(data);
+	console.error(JSON.stringify(data, null, 2));
 }
 
 export const logger = {
